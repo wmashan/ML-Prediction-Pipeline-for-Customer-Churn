@@ -40,7 +40,7 @@ MLOps role
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -245,11 +245,18 @@ def train_single_model(
     )
 
     # ── 3. MLflow logging ─────────────────────────────────────────────────
+    # Each model gets its own *child* run so you can compare them side-by-side
+    # in the MLflow UI.  The parent run is created by train_all_models().
     if _MLFLOW_AVAILABLE:
         with mlflow.start_run(run_name=name, nested=True):
+            # Hyperparameters — visible in the "Parameters" tab
             mlflow.log_params(model.get_params())
+            # Evaluation metrics — visible in the "Metrics" tab and charts
             mlflow.log_metrics(metrics)
-            mlflow.sklearn.log_model(model, artifact_path=name)
+            # Serialised model — downloadable from the "Artifacts" tab
+            mlflow.sklearn.log_model(model, artifact_path="model")
+            # Tag so you can filter runs by model family in the UI
+            mlflow.set_tag("model_name", name)
 
     return metrics
 
@@ -289,20 +296,65 @@ def train_all_models(
     catalogue = _build_model_catalogue()
     results: Dict[str, Tuple[Any, Dict[str, float]]] = {}
 
-    for name, model in catalogue.items():
-        metrics = train_single_model(
-            name, model, X_train, y_train, X_test, y_test
-        )
-        results[name] = (model, metrics)
+    # ── Parent run — groups all child model runs under one experiment run ──
+    # Opening start_run() here means every train_single_model() call that
+    # uses nested=True will attach itself as a child of this run.
+    # If MLflow is not installed we skip the context manager entirely.
+    parent_run_id: Optional[str] = None
+    _ctx = mlflow.start_run(run_name="training_session") if _MLFLOW_AVAILABLE else _NullContext()
 
-    # ── Model selection: highest ROC-AUC wins ─────────────────────────────
-    best_name = max(results, key=lambda k: results[k][1]["roc_auc"])
-    best_model, best_metrics = results[best_name]
+    with _ctx as parent_run:
+        if _MLFLOW_AVAILABLE and parent_run is not None:
+            parent_run_id = parent_run.info.run_id
+            # Log high-level pipeline settings on the parent run
+            mlflow.log_params({
+                "test_size":    TEST_SIZE,
+                "random_state": RANDOM_STATE,
+                "n_models":     len(catalogue),
+            })
 
-    logger.info("─" * 50)
-    logger.info("Best model: %s (ROC-AUC=%.4f)", best_name, best_metrics["roc_auc"])
+        for name, model in catalogue.items():
+            metrics = train_single_model(
+                name, model, X_train, y_train, X_test, y_test
+            )
+            results[name] = (model, metrics)
+
+        # ── Model selection: highest ROC-AUC wins ─────────────────────────
+        best_name = max(results, key=lambda k: results[k][1]["roc_auc"])
+        best_model, best_metrics = results[best_name]
+
+        logger.info("─" * 50)
+        logger.info("Best model: %s (ROC-AUC=%.4f)", best_name, best_metrics["roc_auc"])
+
+        # ── Log winner summary + register model in MLflow Registry ─────────
+        if _MLFLOW_AVAILABLE:
+            # Prefix metrics with "best_" so they're easy to spot on the parent
+            mlflow.log_metrics({f"best_{k}": v for k, v in best_metrics.items()})
+            mlflow.set_tag("best_model", best_name)
+
+            # Log the winning model artifact on the parent run as well
+            mlflow.sklearn.log_model(
+                best_model,
+                artifact_path="best_model",
+                registered_model_name="churn_best_model",  # saves to Model Registry
+            )
+            logger.info(
+                "  Registered to MLflow Model Registry as 'churn_best_model'."
+            )
 
     return best_name, best_model, best_metrics, results
+
+
+# ---------------------------------------------------------------------------
+# Tiny null context manager so we can write `with _NullContext()` when MLflow
+# is not available without duplicating the training loop.
+# ---------------------------------------------------------------------------
+class _NullContext:
+    """No-op context manager — used as a stand-in when MLflow is absent."""
+    def __enter__(self) -> None:
+        return None
+    def __exit__(self, *_: Any) -> None:
+        return None
 
 
 # ============================================================================
