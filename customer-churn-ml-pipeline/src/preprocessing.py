@@ -139,7 +139,9 @@ def handle_missing_values(
         df.drop(columns=cols_to_drop, inplace=True)
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    cat_cols     = df.select_dtypes(include=["object", "category"]).columns
+    # include "str" so pandas 3.x StringDtype columns are captured alongside
+    # the legacy object dtype used by pandas < 3.
+    cat_cols     = df.select_dtypes(include=["object", "category", "str"]).columns
 
     # Fill numeric nulls
     for col in numeric_cols:
@@ -190,10 +192,12 @@ def cast_types(df: pd.DataFrame, target_col: str = "churn") -> pd.DataFrame:
         logger.debug("Cast 'totalcharges' to numeric.")
 
     # Encode binary target label: 'Yes' → 1, 'No' → 0
+    # Use is_numeric_dtype instead of dtype == object so this works on both
+    # the legacy object dtype (pandas < 3) and the new StringDtype (pandas ≥ 3).
     if target_col in df.columns:
-        if df[target_col].dtype == object:
+        if not pd.api.types.is_numeric_dtype(df[target_col]):
             df[target_col] = (
-                df[target_col].str.strip().str.lower()
+                df[target_col].astype(str).str.strip().str.lower()
                 .map({"yes": 1, "no": 0})
             )
         df[target_col] = df[target_col].astype(int)

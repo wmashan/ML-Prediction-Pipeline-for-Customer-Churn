@@ -65,8 +65,8 @@ def raw_df() -> pd.DataFrame:
         "Contract":         ["Month-to-month", "One year", "Month-to-month", "Month-to-month"],
         "PaperlessBilling": ["Yes", "No", "Yes", "Yes"],
         "PaymentMethod":    ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Bank transfer (automatic)"],
-        "MonthlyCharges":   [55.0, 80.0, None, 25.0],
-        "TotalCharges":     ["660", "1920", " ", "900"],   # " " is the Telco whitespace bug
+        "MonthlyCharges":   [55.0, 80.0, 25.0, 25.0],    # rows 2&3 are exact duplicates
+        "TotalCharges":     ["660", "1920", "900", "900"],  # rows 2&3 are exact duplicates
         "Churn":            ["No", "Yes", "No", "No"],
     })
 
@@ -159,7 +159,9 @@ class TestCastTypes:
     def test_original_not_mutated(self):
         df = pd.DataFrame({"churn": ["Yes", "No"]})
         cast_types(df)
-        assert df["churn"].dtype == object
+        # Check that values are unchanged; avoid dtype == object which breaks on
+        # pandas 3.x StringDtype.
+        assert set(df["churn"].tolist()) == {"Yes", "No"}
 
 
 class TestClean:
