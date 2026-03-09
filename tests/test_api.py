@@ -56,12 +56,23 @@ SAMPLE_CUSTOMER = {
 
 class TestHealthEndpoint:
     def test_health_returns_200(self):
+        # /health must always return 200, even when the model isn't loaded.
+        # (Returning 503 would kill the pod before it has a chance to start.)
         response = client.get("/health")
         assert response.status_code == 200
 
-    def test_health_returns_ok(self):
+    def test_health_status_field_present(self):
+        # Status is either "ok" (model loaded) or "degraded" (model missing).
+        # Both are valid here because no real model file exists during tests.
         response = client.get("/health")
-        assert response.json()["status"] == "ok"
+        assert response.json()["status"] in ("ok", "degraded")
+
+    def test_health_has_readiness_flags(self):
+        # The response must advertise whether the model and preprocessor
+        # are loaded so K8s readiness probes can inspect the payload.
+        data = client.get("/health").json()
+        assert "model_loaded" in data
+        assert "preprocessor_loaded" in data
 
 
 class TestModelInfoEndpoint:
@@ -77,7 +88,9 @@ class TestModelInfoEndpoint:
 class TestPredictEndpoint:
     def test_predict_with_mocked_model(self):
         """Mock predict_single so we don't need a real model file."""
-        mock_result = {"churn": 1, "probability": 0.82, "label": "Churn"}
+        # PredictionResponse requires all four fields: churn, probability,
+        # label, and threshold. Omitting threshold causes a 422 from Pydantic.
+        mock_result = {"churn": 1, "probability": 0.82, "label": "Churn", "threshold": 0.5}
         with patch("api.main.predict_single", return_value=mock_result):
             response = client.post("/predict", json=SAMPLE_CUSTOMER)
         assert response.status_code == 200
@@ -100,10 +113,13 @@ class TestPredictEndpoint:
 
 
 class TestBatchPredictEndpoint:
-    def test_batch_predict_returns_list(self):
+    def test_batch_predict_returns_envelope(self):
+        # /predict-batch returns {"scored": N, "predictions": [...]}
+        # NOT a bare list — use the envelope to get the predictions array.
         mock_df_result = __import__("pandas").DataFrame([{
             **SAMPLE_CUSTOMER,
             "churn_probability": 0.75,
+            "churn_prediction": 1,
             "churn_label": "Churn",
         }])
         with patch("api.main.predict_batch", return_value=mock_df_result):
@@ -112,5 +128,21 @@ class TestBatchPredictEndpoint:
                 json={"customers": [SAMPLE_CUSTOMER]}
             )
         assert response.status_code == 200
-        assert isinstance(response.json(), list)
-        assert len(response.json()) == 1
+        data = response.json()
+        # Top-level envelope keys
+        assert "scored" in data
+        assert "predictions" in data
+        # scored count matches input length
+        assert data["scored"] == 1
+        assert isinstance(data["predictions"], list)
+        assert len(data["predictions"]) == 1
+
+    def test_batch_predict_missing_customers_returns_422(self):
+        # Sending an empty body should fail Pydantic validation
+        response = client.post("/predict-batch", json={})
+        assert response.status_code == 422
+
+    def test_batch_predict_empty_list_returns_422(self):
+        # An empty customers list makes no sense to score
+        response = client.post("/predict-batch", json={"customers": []})
+        assert response.status_code == 422
