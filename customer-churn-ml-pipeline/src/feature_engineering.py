@@ -1,175 +1,338 @@
 """
 feature_engineering.py
 -----------------------
-Transforms cleaned data into model-ready features.
+Creates new, model-ready columns from the cleaned Telco churn DataFrame.
 
-Responsibilities:
-  1. Encode categorical variables (Label / One-Hot).
-  2. Scale numeric features (StandardScaler / MinMaxScaler).
-  3. Create new derived features that may improve model accuracy.
-  4. Split data into train / test sets.
+Design principle
+----------------
+This module is PURELY Pandas — no sklearn, no fitting, no state.
+It runs AFTER preprocessing.py (which handles cleaning + sklearn Pipeline)
+and BEFORE train.py (which fits the model).
 
-ML role       : Better features → better model performance.
-Data Eng role : Builds the feature store input; transforms are repeatable.
-MLOps role    : Sklearn Pipeline wraps transforms so inference reuses
-                the SAME fitted scaler/encoder — no training/serving skew.
+Why keep feature engineering separate from preprocessing?
+  - Preprocessing = correctness (fix dtypes, fill nulls, standardise names).
+  - Feature engineering = insight (encode domain knowledge as numeric signals).
+  - Separation makes each layer independently testable and reusable.
+
+Features added (all explainable to a business stakeholder)
+----------------------------------------------------------
+  tenure_group         : Bucket tenure into 5 lifecycle bands (0-1yr … 6yr+).
+                         ML benefit: Tree models handle ordinal bands better than
+                         a raw integer; also exposes non-linear churn patterns
+                         (e.g. churn spikes in the first 12 months).
+
+  avg_monthly_spend    : totalcharges / (tenure + 1).
+                         Proxy for how much a customer pays per month even when
+                         'totalcharges' and 'tenure' encode similar info.
+                         ML benefit: Ratio features often help linear models.
+
+  service_count        : Number of active value-added services (0-6).
+                         Customers with many services are "stickier" — harder to
+                         churn because switching cost is higher.
+
+  contract_risk_score  : Numeric encoding of contract type (3=month-to-month,
+                         2=one year, 1=two year). Month-to-month customers
+                         can leave any time, making them highest-risk.
+
+  is_digital_only      : 1 if Paperless Billing AND Electronic check payment.
+                         These customers interact with Telco only digitally and
+                         historically show higher churn rates.
+
+MLOps note
+----------
+All functions are pure (input → output, no side-effects). They are safe to
+call during both training and inference without refitting anything.
 """
 
 import logging
-from typing import Tuple
+from typing import List
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Feature creation helpers
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Service columns used for service_count feature
+# ============================================================================
 
-def create_derived_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add new columns derived from existing ones.
+# The Telco dataset has six boolean "add-on" service columns.
+# After preprocessing.py's standardise_columns(), names are lowercase.
+_SERVICE_COLUMNS: List[str] = [
+    "onlinesecurity",
+    "onlinebackup",
+    "deviceprotection",
+    "techsupport",
+    "streamingtv",
+    "streamingmovies",
+]
 
-    Examples for a Telco churn dataset:
-      - tenure_group   : bucket tenure into short / mid / long-term customers
-      - avg_monthly_spend : totalcharges / (tenure + 1)
+# Risk score mapping: higher number = more likely to churn
+_CONTRACT_RISK: dict = {
+    "month-to-month": 3,  # no lock-in → easiest to leave
+    "one year":       2,  # mild lock-in
+    "two year":       1,  # strong lock-in
+}
+
+
+# ============================================================================
+# Individual feature functions
+# ============================================================================
+
+def add_tenure_group(df: pd.DataFrame) -> pd.DataFrame:
     """
+    Bucket 'tenure' (months) into five lifecycle bands.
+
+    Bands
+    -----
+    "0-1yr"   :  0 – 11 months  (new customers, highest churn risk)
+    "1-2yr"   : 12 – 23 months
+    "2-4yr"   : 24 – 47 months
+    "4-6yr"   : 48 – 71 months
+    "6yr+"    : 72+ months       (veterans, lowest churn risk)
+
+    Why a string label instead of a number?
+      The sklearn OneHotEncoder in preprocessing.py will turn this into
+      binary columns, which lets the model learn a separate coefficient
+      for each band rather than forcing a linear tenure relationship.
+
+    Requires column : 'tenure'
+    New column      : 'tenure_group'  (string, one of the five labels above)
+    """
+    if "tenure" not in df.columns:
+        logger.warning("'tenure' column missing — skipping add_tenure_group.")
+        return df
+
     df = df.copy()
+    bins   = [0,  12,  24,  48,  72,  np.inf]
+    labels = ["0-1yr", "1-2yr", "2-4yr", "4-6yr", "6yr+"]
+    df["tenure_group"] = pd.cut(
+        df["tenure"], bins=bins, labels=labels, right=False
+    ).astype(str)
 
-    if "tenure" in df.columns:
-        bins = [0, 12, 24, 48, 72, np.inf]
-        labels = ["0-1yr", "1-2yr", "2-4yr", "4-6yr", "6yr+"]
-        df["tenure_group"] = pd.cut(
-            df["tenure"], bins=bins, labels=labels, right=False
-        ).astype(str)
-        logger.debug("Created 'tenure_group' feature.")
-
-    if "totalcharges" in df.columns and "tenure" in df.columns:
-        df["avg_monthly_spend"] = df["totalcharges"] / (df["tenure"] + 1)
-        logger.debug("Created 'avg_monthly_spend' feature.")
-
+    logger.debug("Added 'tenure_group'. Distribution:\n%s",
+                 df["tenure_group"].value_counts().to_string())
     return df
 
 
-# ---------------------------------------------------------------------------
-# Column categorisation helper
-# ---------------------------------------------------------------------------
-
-def get_column_groups(
-    df: pd.DataFrame,
-    target_col: str = "churn",
-    id_cols: list[str] | None = None,
-) -> Tuple[list[str], list[str]]:
+def add_avg_monthly_spend(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return (numeric_features, categorical_features) excluding target and IDs.
+    Compute average monthly spend as a ratio feature.
+
+    Formula:  avg_monthly_spend = totalcharges / (tenure + 1)
+
+    Adding 1 to tenure avoids division-by-zero for brand-new customers
+    (tenure = 0).
+
+    Why this helps
+    --------------
+    'monthlycharges' captures the *current* plan price, but
+    'avg_monthly_spend' reflects *historical* behaviour including plan
+    changes, promotions, and overage charges.  A customer with high
+    avg_monthly_spend relative to their currentmonthlycharges may have
+    downgraded — a potential churn signal.
+
+    Requires columns : 'totalcharges', 'tenure'
+    New column       : 'avg_monthly_spend'  (float)
     """
-    if id_cols is None:
-        id_cols = ["customerid"]   # common in Telco datasets
+    required = {"totalcharges", "tenure"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        logger.warning("Skipping add_avg_monthly_spend — missing: %s", missing)
+        return df
 
-    drop_cols = [target_col] + [c for c in id_cols if c in df.columns]
-    feature_df = df.drop(columns=drop_cols, errors="ignore")
+    df = df.copy()
+    df["avg_monthly_spend"] = df["totalcharges"] / (df["tenure"] + 1)
 
-    numeric_cols = feature_df.select_dtypes(include=[np.number]).columns.tolist()
-    cat_cols = feature_df.select_dtypes(include=["object", "category"]).columns.tolist()
-
-    logger.info("Numeric features  : %s", numeric_cols)
-    logger.info("Categorical features: %s", cat_cols)
-    return numeric_cols, cat_cols
+    logger.debug("Added 'avg_monthly_spend'. Stats:\n%s",
+                 df["avg_monthly_spend"].describe().to_string())
+    return df
 
 
-# ---------------------------------------------------------------------------
-# Sklearn ColumnTransformer builder
-# ---------------------------------------------------------------------------
-
-def build_preprocessor(
-    numeric_cols: list[str],
-    cat_cols: list[str],
-) -> ColumnTransformer:
+def add_service_count(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a ColumnTransformer that:
-      - Scales numeric columns with StandardScaler
-      - One-hot encodes categorical columns (drops first to avoid multicollinearity)
+    Count the number of active value-added services per customer (0–6).
 
-    Returns a FITTED-ready transformer (call .fit_transform on training data).
+    Services counted (any column that equals 'yes' case-insensitively):
+      onlinesecurity, onlinebackup, deviceprotection,
+      techsupport, streamingtv, streamingmovies
+
+    Why this helps
+    --------------
+    Each extra service increases the switching cost for a customer.
+    A single integer 'service_count' gives the model a compact
+    "stickiness" signal that correlates negatively with churn.
+    Without it, the model would need to combine six sparse OHE columns
+    to discover the same pattern.
+
+    Requires columns : any subset of the six service columns
+    New column       : 'service_count'  (int, 0–6)
     """
-    numeric_transformer = Pipeline(steps=[
-        ("scaler", StandardScaler()),
-    ])
+    present = [c for c in _SERVICE_COLUMNS if c in df.columns]
+    if not present:
+        logger.warning("No service columns found — skipping add_service_count.")
+        return df
 
-    categorical_transformer = Pipeline(steps=[
-        ("onehot", OneHotEncoder(handle_unknown="ignore", drop="first", sparse_output=False)),
-    ])
+    df = df.copy()
+    # Normalise to lowercase string so 'Yes', 'YES', 'yes' all count
+    service_flags = (
+        df[present].astype(str).apply(lambda col: col.str.strip().str.lower())
+        == "yes"
+    ).astype(int)
+    df["service_count"] = service_flags.sum(axis=1)
 
-    preprocessor = ColumnTransformer(transformers=[
-        ("num", numeric_transformer, numeric_cols),
-        ("cat", categorical_transformer, cat_cols),
-    ])
-
-    return preprocessor
+    logger.debug("Added 'service_count'. Distribution:\n%s",
+                 df["service_count"].value_counts().sort_index().to_string())
+    return df
 
 
-# ---------------------------------------------------------------------------
-# Main orchestrator
-# ---------------------------------------------------------------------------
-
-def engineer_features(
-    df: pd.DataFrame,
-    target_col: str = "churn",
-    test_size: float = 0.2,
-    random_state: int = 42,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, ColumnTransformer]:
+def add_contract_risk_score(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Full feature engineering pipeline.
+    Encode contract type as an ordinal churn-risk score.
+
+    Mapping
+    -------
+    month-to-month → 3  (can churn tomorrow — highest risk)
+    one year       → 2  (ETF discourages churn for one year)
+    two year       → 1  (strongest lock-in — lowest risk)
+    unknown / NaN  → 2  (neutral default)
+
+    Why an ordinal number instead of OHE?
+      Contract type has a natural order (shorter = riskier), so a single
+      ordinal integer lets linear models learn a monotone relationship.
+      OHE would treat the three values as independent categories and lose
+      the ordering information.
+
+    Requires column : 'contract'
+    New column      : 'contract_risk_score'  (int, 1–3)
+    """
+    if "contract" not in df.columns:
+        logger.warning("'contract' column missing — skipping add_contract_risk_score.")
+        return df
+
+    df = df.copy()
+    normalised = df["contract"].astype(str).str.strip().str.lower()
+    df["contract_risk_score"] = normalised.map(_CONTRACT_RISK).fillna(2).astype(int)
+
+    logger.debug("Added 'contract_risk_score'. Distribution:\n%s",
+                 df["contract_risk_score"].value_counts().sort_index().to_string())
+    return df
+
+
+def add_is_digital_only(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flag customers who use only digital / self-service channels.
+
+    Rule: is_digital_only = 1  if  PaperlessBilling == 'yes'
+                                   AND PaymentMethod == 'electronic check'
+
+    Why this helps
+    --------------
+    Digital-only customers have fewer human touch-points with the Telco
+    (no paper bills, no direct-debit conversation with the bank).
+    Research on this dataset shows this group churns at ~10 pp above average.
+    A single binary flag is easier for the model to exploit than two OHE
+    dummies that it must implicitly combine.
+
+    Requires columns : 'paperlessbilling', 'paymentmethod'
+    New column       : 'is_digital_only'  (int, 0 or 1)
+    """
+    required = {"paperlessbilling", "paymentmethod"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        logger.warning("Skipping add_is_digital_only — missing: %s", missing)
+        return df
+
+    df = df.copy()
+    paperless = df["paperlessbilling"].astype(str).str.strip().str.lower() == "yes"
+    echeck    = df["paymentmethod"].astype(str).str.strip().str.lower() == "electronic check"
+    df["is_digital_only"] = (paperless & echeck).astype(int)
+
+    logger.debug("Added 'is_digital_only'. Value counts:\n%s",
+                 df["is_digital_only"].value_counts().to_string())
+    return df
+
+
+# ============================================================================
+# Orchestrator — runs all feature functions in sequence
+# ============================================================================
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply all feature engineering steps and return the enriched DataFrame.
+
+    Calling order matters: later features may use columns added by earlier ones,
+    but in practice these five are independent of each other.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Cleaned DataFrame from preprocessing step.
-    target_col : str
-        Column to predict.
-    test_size : float
-        Fraction of data reserved for testing.
-    random_state : int
-        Ensures reproducible splits.
+        Cleaned DataFrame from preprocessing.clean() — column names must be
+        lowercase with underscores (already done by standardise_columns).
 
     Returns
     -------
-    X_train, X_test, y_train, y_test : np.ndarray
-    preprocessor : fitted ColumnTransformer (save this for inference!)
+    pd.DataFrame
+        Same rows as input, with up to 5 extra columns:
+          tenure_group, avg_monthly_spend, service_count,
+          contract_risk_score, is_digital_only.
+
+    Usage in train.py
+    -----------------
+        from src.preprocessing      import clean
+        from src.feature_engineering import engineer_features
+
+        df = clean(raw_df)
+        df = engineer_features(df)        # ← add domain features
+        pipeline, X, y = fit_pipeline(df)  # ← fit sklearn transforms
     """
-    logger.info("Starting feature engineering.")
+    logger.info("Starting feature engineering on DataFrame with shape %s.", df.shape)
 
-    df = create_derived_features(df)
+    df = add_tenure_group(df)
+    df = add_avg_monthly_spend(df)
+    df = add_service_count(df)
+    df = add_contract_risk_score(df)
+    df = add_is_digital_only(df)
 
-    # Separate features and target
-    X = df.drop(columns=[target_col, "customerid"], errors="ignore")
-    y = df[target_col].values
+    new_cols = [
+        "tenure_group", "avg_monthly_spend",
+        "service_count", "contract_risk_score", "is_digital_only",
+    ]
+    created = [c for c in new_cols if c in df.columns]
+    logger.info("Feature engineering complete. New columns: %s", created)
+    return df
 
-    # Split BEFORE fitting transforms → prevents data leakage
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
-    )
 
-    numeric_cols, cat_cols = get_column_groups(df, target_col=target_col)
+# ============================================================================
+# Standalone smoke-test  (python src/feature_engineering.py)
+# ============================================================================
 
-    # Remove extra columns that might appear after split
-    numeric_cols = [c for c in numeric_cols if c in X_train.columns]
-    cat_cols = [c for c in cat_cols if c in X_train.columns]
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
 
-    preprocessor = build_preprocessor(numeric_cols, cat_cols)
+    sample = pd.DataFrame({
+        "customerid":       ["001", "002", "003"],
+        "tenure":           [2,     24,    60],
+        "totalcharges":     [110.0, 1920.0, 5400.0],
+        "monthlycharges":   [55.0,  80.0,   90.0],
+        "contract":         ["Month-to-month", "One year", "Two year"],
+        "paperlessbilling": ["Yes", "No",  "Yes"],
+        "paymentmethod":    ["Electronic check", "Mailed check", "Bank transfer (automatic)"],
+        "onlinesecurity":   ["No",  "Yes", "Yes"],
+        "onlinebackup":     ["No",  "Yes", "Yes"],
+        "deviceprotection": ["No",  "No",  "Yes"],
+        "techsupport":      ["No",  "No",  "Yes"],
+        "streamingtv":      ["No",  "No",  "Yes"],
+        "streamingmovies":  ["No",  "No",  "Yes"],
+        "churn":            [1, 0, 0],
+    })
 
-    X_train = preprocessor.fit_transform(X_train)   # fit on train only
-    X_test = preprocessor.transform(X_test)          # apply same transform to test
-
-    logger.info(
-        "Feature engineering done. X_train: %s | X_test: %s",
-        X_train.shape, X_test.shape
-    )
-
-    return X_train, X_test, y_train, y_test, preprocessor
+    enriched = engineer_features(sample)
+    print("\nEnriched DataFrame:")
+    print(enriched[[
+        "customerid", "tenure", "tenure_group",
+        "avg_monthly_spend", "service_count",
+        "contract_risk_score", "is_digital_only",
+    ]].to_string(index=False))
+    print("\nAll columns:", enriched.columns.tolist())

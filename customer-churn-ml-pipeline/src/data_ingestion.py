@@ -193,13 +193,15 @@ def log_data_summary(df: pd.DataFrame) -> Dict[str, object]:
     n_missing = int(df.isnull().sum().sum())
 
     # Churn rate — handles both "Yes"/"No" string and 0/1 int encodings
+    # Use is_numeric_dtype instead of dtype == object so this works on both
+    # the legacy object dtype (pandas < 3) and StringDtype (pandas ≥ 3).
     churn_rate: Optional[float] = None
     if "Churn" in df.columns:
         col = df["Churn"]
-        if col.dtype == object:
-            churn_rate = round((col.str.lower() == "yes").mean() * 100, 2)
-        else:
+        if pd.api.types.is_numeric_dtype(col):
             churn_rate = round(float(col.mean()) * 100, 2)
+        else:
+            churn_rate = round((col.astype(str).str.lower() == "yes").mean() * 100, 2)
 
     summary: Dict[str, object] = {
         "n_rows":          df.shape[0],
