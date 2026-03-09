@@ -1,81 +1,110 @@
 # .github/workflows/ci.yml
 # --------------------------
-# GitHub Actions CI Pipeline
+# GitHub Actions CI Pipeline – Customer Churn Prediction API
 #
-# Triggers on every push to main/develop and on every pull request.
-# Jobs:
-#   1. lint   – code quality checks (flake8)
-#   2. test   – run pytest with coverage
-#   3. build  – build Docker image to verify it compiles correctly
+# ┌─────────────────────────────────────────────────────────────┐
+# │  What this file does (plain English)                        │
+# │                                                             │
+# │  Every time you push code, GitHub automatically:            │
+# │    1. Checks code style (lint)                              │
+# │    2. Runs all unit tests                                    │
+# │    3. Builds the Docker image to make sure it compiles      │
+# │                                                             │
+# │  If any step fails, you get an email / red ✗ on GitHub.     │
+# │  This catches bugs before they reach your teammates.        │
+# └─────────────────────────────────────────────────────────────┘
 #
-# MLOps role: Automates quality gates.  Bad code never reaches main branch.
-# Data Eng   : Schema / data pipeline tests run here too.
-# ML role    : Preprocessing and feature engineering unit tests run here.
+# MLOps role:
+#   CI is the first gate in the ML delivery pipeline.
+#   It ensures that every model-serving code change is tested before
+#   deployment – preventing broken APIs from reaching production.
 
 name: CI Pipeline
 
+# ── When to run ──────────────────────────────────────────────────────────────
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop]       # Run on every push to these branches
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop]       # Run on every PR targeting these branches
+  workflow_dispatch:                # "Run workflow" button in the GitHub UI
+    # Useful for manually triggering CI without pushing a commit.
 
+# ── Jobs ─────────────────────────────────────────────────────────────────────
 jobs:
-  # --------------------------------------------------------------------------
-  # Job 1 – Lint
-  # --------------------------------------------------------------------------
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1 – Lint (code style check)
+  # ────────────────────────────────────────────────────────────────────────────
+  # Catches obvious mistakes: unused imports, undefined variables,
+  # inconsistent indentation. Fast – runs in ~10 seconds.
   lint:
-    name: Lint (flake8)
+    name: "1 · Lint (flake8)"
     runs-on: ubuntu-latest
 
     steps:
+      # Download the repository code onto the runner machine
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      # Install the requested Python version
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install lint dependencies
+      # Only install flake8 – no need for the full requirements here
+      - name: Install flake8
         run: pip install flake8
 
+      # Run the linter
+      # --max-line-length=120  : allows slightly longer lines (easier to read)
+      # --extend-ignore=W503   : ignores style rule that conflicts with Black
+      # --count --statistics   : shows a summary at the end
       - name: Run flake8
-        # E501: max line length – relaxed to 120 chars for readability
-        # W503: line break before binary operator – conflicts with Black
         run: |
           flake8 src/ api/ tests/ \
             --max-line-length=120 \
             --extend-ignore=W503,E203 \
             --count --statistics
 
-  # --------------------------------------------------------------------------
+  # ────────────────────────────────────────────────────────────────────────────
   # Job 2 – Tests
-  # --------------------------------------------------------------------------
+  # ────────────────────────────────────────────────────────────────────────────
+  # Runs the full test suite with coverage reporting.
+  # Only starts after lint passes (saves runner minutes on bad code).
   test:
-    name: Unit & Integration Tests
+    name: "2 · Tests (pytest)"
     runs-on: ubuntu-latest
-    needs: lint   # Only run tests if linting passes
+    needs: lint         # Wait for lint to pass before starting
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Cache installed packages so repeat runs are faster.
+      # The cache is invalidated when either requirements file changes.
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-prod.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
+      # requirements.txt includes dev tools (pytest, httpx, flake8)
+      # which are needed in CI but not in the Docker image
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Run all tests under tests/
+      # --tb=short        : compact traceback (easier to read in CI logs)
+      # --cov-fail-under  : fail the job if coverage drops below 70 %
       - name: Run tests with coverage
         run: |
           pytest tests/ \
@@ -86,6 +115,9 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=70
 
+      # Save the coverage data file as a downloadable artefact.
+      # "if: always()" means this runs even when tests fail, so you can
+      # inspect partial coverage after a broken test run.
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
@@ -93,18 +125,26 @@ jobs:
           name: coverage-report
           path: .coverage
 
-  # --------------------------------------------------------------------------
-  # Job 3 – Docker build (smoke test)
-  # --------------------------------------------------------------------------
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3 – Docker build + smoke test
+  # ────────────────────────────────────────────────────────────────────────────
+  # Builds the production Docker image and starts it to verify:
+  #   a) the image compiles without error
+  #   b) the API starts and /health returns HTTP 200
+  #
+  # Uses requirements-prod.txt (set up in Step 12), so dev packages are
+  # not baked into the image that goes to production.
   docker-build:
-    name: Docker Build Smoke Test
+    name: "3 · Docker build & smoke test"
     runs-on: ubuntu-latest
-    needs: test   # Only build if tests pass
+    needs: test         # Only build if tests pass
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Build the image tagged with the git commit SHA so each CI run
+      # produces a uniquely identifiable image.
       - name: Build Docker image
         run: |
           docker build \
@@ -112,12 +152,34 @@ jobs:
             --file Dockerfile \
             .
 
-      - name: Verify container starts
+      # Start the container in detached mode (-d) and poll /health
+      # with retries. Without retries, a 2-3 second startup delay causes
+      # a false failure.
+      - name: Start container and verify /health returns 200
         run: |
           docker run --rm -d \
             --name churn-api-smoke \
             -p 8000:8000 \
             churn-api:ci-${{ github.sha }}
-          sleep 5
-          curl --fail http://localhost:8000/health || (docker logs churn-api-smoke && exit 1)
+
+          echo "Waiting for API to start..."
+          for i in $(seq 1 10); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ /health returned 200 on attempt $i"
+              break
+            fi
+            echo "  attempt $i – got '$STATUS', retrying in 3s..."
+            sleep 3
+          done
+
+          # Final hard check – if still not 200, print logs and fail
+          FINAL=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || true)
+          if [ "$FINAL" != "200" ]; then
+            echo "✗ Health check failed after all retries (last status: $FINAL)"
+            docker logs churn-api-smoke
+            docker stop churn-api-smoke
+            exit 1
+          fi
+
           docker stop churn-api-smoke
