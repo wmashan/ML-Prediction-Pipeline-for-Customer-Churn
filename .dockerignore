@@ -1,0 +1,61 @@
+# .dockerignore
+# -------------
+# Prevents unnecessary files from being sent to the Docker build context.
+# Keeps builds fast, images small, and avoids leaking secrets or local data.
+
+# ── Python artefacts ───────────────────────────────────────────────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Version control ────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── MLflow tracking store (potentially large; mount as volume in prod) ─────
+mlruns/
+
+# ── Test infrastructure (not needed at runtime) ────────────────────────────
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Notebooks (dev-only) ───────────────────────────────────────────────────
+notebooks/
+
+# ── Raw data (mount as volume or pull from object storage in prod) ─────────
+data/raw/
+data/processed/
+
+# ── Sample payloads (API docs only) ───────────────────────────────────────
+samples/
+
+# ── CI / tooling config ────────────────────────────────────────────────────
+.github/
+.flake8
+.mypy.ini
+setup.cfg
+tox.ini
+
+# ── macOS metadata ─────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+
+# ── Editor / IDE ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Dev requirements (prod image uses requirements-prod.txt) ───────────────
+requirements.txt

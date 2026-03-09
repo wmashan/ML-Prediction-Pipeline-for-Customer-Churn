@@ -1,0 +1,27 @@
+# requirements-prod.txt
+# ----------------------
+# Production-only dependencies — used by the Docker image.
+# Dev/test tools (pytest, flake8, httpx) are intentionally excluded to keep
+# the image small and reduce the attack surface.
+#
+# Dev dependencies live in requirements.txt (used locally and in CI).
+
+# ── Core data science ──────────────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+
+# ── ML experiment tracking ─────────────────────────────────────────────────
+mlflow==2.13.0
+
+# ── Model persistence ──────────────────────────────────────────────────────
+joblib==1.4.2
+
+# ── API framework ──────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+
+# ── Visualisation (used by evaluate.py — kept for batch scoring support) ───
+matplotlib==3.8.4
+seaborn==0.13.2

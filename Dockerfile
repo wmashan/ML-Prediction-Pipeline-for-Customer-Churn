@@ -20,10 +20,12 @@ FROM python:3.11-slim AS builder
 WORKDIR /app
 
 # Install pip dependencies into an isolated virtual environment
-COPY requirements.txt .
+# requirements-prod.txt excludes dev/test packages (pytest, flake8, httpx)
+# to keep the image lean and reduce the attack surface.
+COPY requirements-prod.txt .
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+    /opt/venv/bin/pip install --no-cache-dir -r requirements-prod.txt
 
 # ---------------------------------------------------------------------------
 # Stage 2 – Runtime
@@ -57,9 +59,13 @@ USER appuser
 
 EXPOSE 8000
 
-# Health check – Docker / Kubernetes will poll this endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+# Health check – Docker / Kubernetes will poll this endpoint.
+# Explicitly validates HTTP 200 so a running-but-broken API is caught.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD python -c \
+    "import urllib.request, sys; \
+     r = urllib.request.urlopen('http://localhost:8000/health'); \
+     sys.exit(0 if r.status == 200 else 1)"
 
 # Start the FastAPI app with uvicorn
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
