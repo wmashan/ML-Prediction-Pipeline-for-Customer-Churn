@@ -139,9 +139,7 @@ def handle_missing_values(
         df.drop(columns=cols_to_drop, inplace=True)
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    # include "str" so pandas 3.x StringDtype columns are captured alongside
-    # the legacy object dtype used by pandas < 3.
-    cat_cols     = df.select_dtypes(include=["object", "category", "str"]).columns
+    cat_cols     = df.select_dtypes(include=["object", "category"]).columns
 
     # Fill numeric nulls
     for col in numeric_cols:
