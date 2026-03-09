@@ -1,0 +1,153 @@
+{
+  "info": {
+    "name": "Customer Churn Prediction API",
+    "description": "Postman collection for the FastAPI churn prediction service.\n\nStart the server first:\n  uvicorn api.main:app --reload --port 8000\n\nThen import this file into Postman: File → Import → Upload Files.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key":   "base_url",
+      "value": "http://localhost:8000",
+      "type":  "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Ops",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url":    "{{base_url}}/health",
+            "description": "Liveness probe — returns 200 + model readiness status."
+          }
+        },
+        {
+          "name": "Model Info",
+          "request": {
+            "method": "GET",
+            "url":    "{{base_url}}/model-info",
+            "description": "Returns the loaded model name and type. Use as a readiness check after deployment."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Prediction",
+      "item": [
+        {
+          "name": "Predict Single — High Risk",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw":   "{{base_url}}/predict",
+              "host":  ["{{base_url}}"],
+              "path":  ["predict"]
+            },
+            "header": [
+              {
+                "key":   "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gender\":           \"Female\",\n  \"seniorcitizen\":    0,\n  \"partner\":          \"No\",\n  \"dependents\":       \"No\",\n  \"tenure\":           6,\n  \"phoneservice\":     \"Yes\",\n  \"multiplelines\":    \"No\",\n  \"internetservice\":  \"Fiber optic\",\n  \"onlinesecurity\":   \"No\",\n  \"onlinebackup\":     \"No\",\n  \"deviceprotection\": \"No\",\n  \"techsupport\":      \"No\",\n  \"streamingtv\":      \"Yes\",\n  \"streamingmovies\":  \"Yes\",\n  \"contract\":         \"Month-to-month\",\n  \"paperlessbilling\": \"Yes\",\n  \"paymentmethod\":    \"Electronic check\",\n  \"monthlycharges\":   89.85,\n  \"totalcharges\":     539.10\n}"
+            },
+            "description": "High-risk profile: short tenure, Fiber optic, month-to-month, Electronic check, no add-on services. Expect high churn probability."
+          }
+        },
+        {
+          "name": "Predict Single — Low Risk",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw":  "{{base_url}}/predict",
+              "host": ["{{base_url}}"],
+              "path": ["predict"]
+            },
+            "header": [
+              {
+                "key":   "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gender\":           \"Male\",\n  \"seniorcitizen\":    0,\n  \"partner\":          \"Yes\",\n  \"dependents\":       \"Yes\",\n  \"tenure\":           60,\n  \"phoneservice\":     \"Yes\",\n  \"multiplelines\":    \"Yes\",\n  \"internetservice\":  \"DSL\",\n  \"onlinesecurity\":   \"Yes\",\n  \"onlinebackup\":     \"Yes\",\n  \"deviceprotection\": \"Yes\",\n  \"techsupport\":      \"Yes\",\n  \"streamingtv\":      \"No\",\n  \"streamingmovies\":  \"No\",\n  \"contract\":         \"Two year\",\n  \"paperlessbilling\": \"No\",\n  \"paymentmethod\":    \"Bank transfer (automatic)\",\n  \"monthlycharges\":   65.70,\n  \"totalcharges\":     3942.00\n}"
+            },
+            "description": "Low-risk profile: long tenure, two-year contract, many services, bank transfer. Expect low churn probability."
+          }
+        },
+        {
+          "name": "Predict Single — Custom Threshold (0.35)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw":   "{{base_url}}/predict?threshold=0.35",
+              "host":  ["{{base_url}}"],
+              "path":  ["predict"],
+              "query": [{ "key": "threshold", "value": "0.35" }]
+            },
+            "header": [
+              {
+                "key":   "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gender\":           \"Male\",\n  \"seniorcitizen\":    1,\n  \"partner\":          \"No\",\n  \"dependents\":       \"No\",\n  \"tenure\":           24,\n  \"phoneservice\":     \"Yes\",\n  \"multiplelines\":    \"No\",\n  \"internetservice\":  \"Fiber optic\",\n  \"onlinesecurity\":   \"No\",\n  \"onlinebackup\":     \"Yes\",\n  \"deviceprotection\": \"No\",\n  \"techsupport\":      \"No\",\n  \"streamingtv\":      \"No\",\n  \"streamingmovies\":  \"No\",\n  \"contract\":         \"One year\",\n  \"paperlessbilling\": \"Yes\",\n  \"paymentmethod\":    \"Mailed check\",\n  \"monthlycharges\":   74.45,\n  \"totalcharges\":     1786.80\n}"
+            },
+            "description": "Same medium-risk customer scored at threshold=0.35. Compare the 'churn' label vs the default threshold=0.5 call to see how the cutoff affects the decision."
+          }
+        },
+        {
+          "name": "Predict Single — Invalid Payload (422 test)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw":  "{{base_url}}/predict",
+              "host": ["{{base_url}}"],
+              "path": ["predict"]
+            },
+            "header": [
+              {
+                "key":   "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gender\": \"Female\",\n  \"tenure\": -5\n}"
+            },
+            "description": "Intentionally invalid — tenure is negative and most fields are missing. Expect HTTP 422 with a field-level error list from the custom Pydantic handler."
+          }
+        },
+        {
+          "name": "Predict Batch (4 customers)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw":  "{{base_url}}/predict-batch",
+              "host": ["{{base_url}}"],
+              "path": ["predict-batch"]
+            },
+            "header": [
+              {
+                "key":   "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threshold\": 0.5,\n  \"customers\": [\n    {\n      \"gender\": \"Female\", \"seniorcitizen\": 0, \"partner\": \"No\", \"dependents\": \"No\",\n      \"tenure\": 6, \"phoneservice\": \"Yes\", \"multiplelines\": \"No\",\n      \"internetservice\": \"Fiber optic\", \"onlinesecurity\": \"No\", \"onlinebackup\": \"No\",\n      \"deviceprotection\": \"No\", \"techsupport\": \"No\", \"streamingtv\": \"Yes\",\n      \"streamingmovies\": \"Yes\", \"contract\": \"Month-to-month\",\n      \"paperlessbilling\": \"Yes\", \"paymentmethod\": \"Electronic check\",\n      \"monthlycharges\": 89.85, \"totalcharges\": 539.10\n    },\n    {\n      \"gender\": \"Male\", \"seniorcitizen\": 0, \"partner\": \"Yes\", \"dependents\": \"Yes\",\n      \"tenure\": 60, \"phoneservice\": \"Yes\", \"multiplelines\": \"Yes\",\n      \"internetservice\": \"DSL\", \"onlinesecurity\": \"Yes\", \"onlinebackup\": \"Yes\",\n      \"deviceprotection\": \"Yes\", \"techsupport\": \"Yes\", \"streamingtv\": \"No\",\n      \"streamingmovies\": \"No\", \"contract\": \"Two year\",\n      \"paperlessbilling\": \"No\", \"paymentmethod\": \"Bank transfer (automatic)\",\n      \"monthlycharges\": 65.70, \"totalcharges\": 3942.00\n    },\n    {\n      \"gender\": \"Male\", \"seniorcitizen\": 1, \"partner\": \"No\", \"dependents\": \"No\",\n      \"tenure\": 24, \"phoneservice\": \"Yes\", \"multiplelines\": \"No\",\n      \"internetservice\": \"Fiber optic\", \"onlinesecurity\": \"No\", \"onlinebackup\": \"Yes\",\n      \"deviceprotection\": \"No\", \"techsupport\": \"No\", \"streamingtv\": \"No\",\n      \"streamingmovies\": \"No\", \"contract\": \"One year\",\n      \"paperlessbilling\": \"Yes\", \"paymentmethod\": \"Mailed check\",\n      \"monthlycharges\": 74.45, \"totalcharges\": 1786.80\n    },\n    {\n      \"gender\": \"Female\", \"seniorcitizen\": 1, \"partner\": \"Yes\", \"dependents\": \"No\",\n      \"tenure\": 1, \"phoneservice\": \"Yes\", \"multiplelines\": \"No\",\n      \"internetservice\": \"No\", \"onlinesecurity\": \"No internet service\",\n      \"onlinebackup\": \"No internet service\", \"deviceprotection\": \"No internet service\",\n      \"techsupport\": \"No internet service\", \"streamingtv\": \"No internet service\",\n      \"streamingmovies\": \"No internet service\", \"contract\": \"Month-to-month\",\n      \"paperlessbilling\": \"No\", \"paymentmethod\": \"Mailed check\",\n      \"monthlycharges\": 20.05, \"totalcharges\": 20.05\n    }\n  ]\n}"
+            },
+            "description": "Batch of 4 customers covering high-risk, low-risk, medium-risk, and edge-case profiles. Returns a 'predictions' array in the same order."
+          }
+        }
+      ]
+    }
+  ]
+}
